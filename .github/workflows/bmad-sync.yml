@@ -1,0 +1,49 @@
+name: BMAD Sync (reusable)
+
+# Org-shared, per-product BMAD → GitHub Issues sync. Each product's home repo carries a thin
+# caller workflow that `uses:` this one; the logic (bridge + runner) lives here once so it never
+# drifts. See andrelair-platform rules: bmad.md (*Per-product BMAD*), github-projects.md.
+#
+# The caller supplies the token via `secrets: inherit` (org secret GITOPS_TOKEN — needs repo issue
+# write + project write). Each story's frontmatter (`repo:` / `project:` / `milestone:`) routes the
+# created issue to the right member repo + product board; the bridge is idempotent.
+
+on:
+  workflow_call:
+    inputs:
+      stories-root:
+        description: Root directory of the caller repo's BMAD stories.
+        required: false
+        type: string
+        default: bmad/stories
+      dry-run:
+        description: If true, parse + print but create nothing.
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout shared BMAD bridge (andrelair-platform/.github)
+        uses: actions/checkout@v4
+        with:
+          repository: andrelair-platform/.github
+          ref: main
+          path: .bmad-bridge
+
+      - name: Sync stories → issues
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          BRIDGE: ${{ github.workspace }}/.bmad-bridge/scripts/bmad-to-github.sh
+          STORIES_ROOT: ${{ inputs.stories-root }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: bash "${GITHUB_WORKSPACE}/.bmad-bridge/scripts/bmad-sync-runner.sh"
