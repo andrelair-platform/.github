@@ -119,6 +119,7 @@ print(f"STORY_ID={story_id}")
 print(f"REPO_OVERRIDE={meta.get('repo', '')}")
 print(f"PROJECT_OVERRIDE={meta.get('project', '')}")
 print(f"MILESTONE_OVERRIDE={meta.get('milestone', '')}")
+print(f"PRIORITY={meta.get('priority', '')}")
 print("---BODY---")
 print(body.strip())
 PYEOF
@@ -152,6 +153,71 @@ verify_milestone() {
 }
 
 # ---------------------------------------------------------------------------
+# Set the board "Priority" single-select field on a just-added project item.
+# Args: <project_number> <owner> <item-add JSON> <priority value>
+# The priority value may be a P-token (P1..P5, or "P1 — Critical") or MoSCoW
+# (Must/Should/Could/Won't → P1/P2/P3/P5). No-ops (non-fatal) if the board has
+# no Priority field or the value can't be mapped. Field metadata is cached per
+# project in $PRIO_CACHE_DIR so we resolve it once, not per story.
+# ---------------------------------------------------------------------------
+set_board_priority() {
+  python3 - "$1" "$2" "$3" "$4" "${PRIO_CACHE_DIR}" <<'PYEOF'
+import sys, json, subprocess, os, re
+project_num, owner, item_json, prio_val, cache_dir = sys.argv[1:6]
+try:
+    item_id = json.loads(item_json).get('id')
+except Exception:
+    sys.exit(1)
+if not item_id:
+    sys.exit(1)
+
+cache = os.path.join(cache_dir, "proj-%s.json" % project_num)
+if os.path.exists(cache):
+    meta = json.load(open(cache))
+else:
+    pv = subprocess.run(['gh','project','view',project_num,'--owner',owner,'--format','json'],
+                        capture_output=True, text=True)
+    fl = subprocess.run(['gh','project','field-list',project_num,'--owner',owner,'--format','json'],
+                        capture_output=True, text=True)
+    if pv.returncode != 0 or fl.returncode != 0:
+        sys.exit(1)
+    node_id = json.loads(pv.stdout).get('id')
+    pf = next((f for f in json.loads(fl.stdout).get('fields', []) if f.get('name') == 'Priority'), None)
+    if not pf:
+        json.dump({'field_id': None}, open(cache, 'w'))   # cache "no Priority field"
+        sys.exit(0)
+    meta = {'node_id': node_id, 'field_id': pf.get('id'),
+            'options': {o['name']: o['id'] for o in pf.get('options', [])}}
+    json.dump(meta, open(cache, 'w'))
+
+if not meta.get('field_id'):
+    sys.exit(0)   # board has no Priority field → nothing to do
+
+val = (prio_val or '').strip()
+m = re.match(r'(P[1-5])', val, re.I)
+token = m.group(1).upper() if m else \
+        {'must':'P1','should':'P2','could':'P3','wont':'P5',"won't":'P5'}.get(val.lower())
+optid = None
+if token:
+    optid = next((oid for name, oid in meta['options'].items()
+                  if name.upper().startswith(token)), None)
+if not optid and val in meta['options']:
+    optid = meta['options'][val]
+if not optid:
+    sys.exit(2)   # unknown/unmappable priority → skip (non-fatal)
+
+r = subprocess.run(['gh','project','item-edit','--id',item_id,'--project-id',meta['node_id'],
+                    '--field-id',meta['field_id'],'--single-select-option-id',optid],
+                   capture_output=True, text=True)
+sys.exit(0 if r.returncode == 0 else 1)
+PYEOF
+}
+
+# Temp cache for per-project Priority-field metadata (cleaned on exit).
+PRIO_CACHE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PRIO_CACHE_DIR"' EXIT
+
+# ---------------------------------------------------------------------------
 echo "==> Scanning: $STORY_DIR"
 [[ -n "$REPO" ]]            && echo "==> Default repo:     $REPO"
 [[ -n "$PROJECT_NUMBER" ]] && echo "==> Default project:  #$PROJECT_NUMBER"
@@ -177,6 +243,7 @@ for story_file in "$STORY_DIR"/*.md; do
   REPO_OVERRIDE=$(echo      "$parsed" | grep '^REPO_OVERRIDE='      | cut -d= -f2-)
   PROJECT_OVERRIDE=$(echo   "$parsed" | grep '^PROJECT_OVERRIDE='   | cut -d= -f2-)
   MILESTONE_OVERRIDE=$(echo "$parsed" | grep '^MILESTONE_OVERRIDE=' | cut -d= -f2-)
+  PRIORITY=$(echo "$parsed" | grep '^PRIORITY=' | cut -d= -f2-)
   BODY=$(echo     "$parsed" | awk '/^---BODY---/{found=1; next} found{print}')
 
   ISSUE_REPO="${REPO_OVERRIDE:-$REPO}"
@@ -229,10 +296,22 @@ for story_file in "$STORY_DIR"/*.md; do
   echo "          Created: $issue_url"
 
   if [[ -n "$ISSUE_PROJECT" ]]; then
-    gh project item-add "$ISSUE_PROJECT" --owner "$(cut -d/ -f1 <<< "$ISSUE_REPO")" \
-      --url "$issue_url" 2>/dev/null \
-      && echo "          Added to project #$ISSUE_PROJECT" \
-      || echo "          Warning: project add failed (non-fatal)"
+    owner="$(cut -d/ -f1 <<< "$ISSUE_REPO")"
+    item_json=$(gh project item-add "$ISSUE_PROJECT" --owner "$owner" \
+                  --url "$issue_url" --format json 2>/dev/null || true)
+    if [[ -n "$item_json" ]]; then
+      echo "          Added to project #$ISSUE_PROJECT"
+      # Set the board Priority field from frontmatter `priority:` (non-fatal).
+      if [[ -n "$PRIORITY" ]]; then
+        if set_board_priority "$ISSUE_PROJECT" "$owner" "$item_json" "$PRIORITY"; then
+          echo "          Priority set: $PRIORITY"
+        else
+          echo "          Warning: priority '$PRIORITY' not set (no field / unmapped) — non-fatal"
+        fi
+      fi
+    else
+      echo "          Warning: project add failed (non-fatal)"
+    fi
   fi
 
   created=$((created + 1)); sleep 1
