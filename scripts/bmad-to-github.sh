@@ -120,6 +120,8 @@ print(f"REPO_OVERRIDE={meta.get('repo', '')}")
 print(f"PROJECT_OVERRIDE={meta.get('project', '')}")
 print(f"MILESTONE_OVERRIDE={meta.get('milestone', '')}")
 print(f"PRIORITY={meta.get('priority', '')}")
+print(f"TYPE={meta.get('type', '')}")
+print(f"INITIATIVE={meta.get('initiative', '')}")
 print("---BODY---")
 print(body.strip())
 PYEOF
@@ -213,7 +215,63 @@ sys.exit(0 if r.returncode == 0 else 1)
 PYEOF
 }
 
-# Temp cache for per-project Priority-field metadata (cleaned on exit).
+# ---------------------------------------------------------------------------
+# Generic: set ANY single-select board field by NAME on a just-added item.
+# Args: <project_number> <owner> <item-add JSON> <field name> <value>
+# Matches the value to an option by exact → case-insensitive → prefix.
+# Non-fatal: no-ops if the board lacks the field or the value can't be matched.
+# Metadata cached per project+field in $PRIO_CACHE_DIR. Used for Kind/Initiative
+# (Priority keeps its own P-token/MoSCoW mapping in set_board_priority).
+# ---------------------------------------------------------------------------
+set_board_single_select() {
+  python3 - "$1" "$2" "$3" "$4" "$5" "${PRIO_CACHE_DIR}" <<'PYEOF'
+import sys, json, subprocess, os, re
+project_num, owner, item_json, field_name, value, cache_dir = sys.argv[1:7]
+value = (value or '').strip()
+if not value:
+    sys.exit(0)
+try:
+    item_id = json.loads(item_json).get('id')
+except Exception:
+    sys.exit(1)
+if not item_id:
+    sys.exit(1)
+
+safe = re.sub(r'[^A-Za-z0-9]', '_', field_name)
+cache = os.path.join(cache_dir, "proj-%s-%s.json" % (project_num, safe))
+if os.path.exists(cache):
+    meta = json.load(open(cache))
+else:
+    pv = subprocess.run(['gh','project','view',project_num,'--owner',owner,'--format','json'],
+                        capture_output=True, text=True)
+    fl = subprocess.run(['gh','project','field-list',project_num,'--owner',owner,'--format','json'],
+                        capture_output=True, text=True)
+    if pv.returncode != 0 or fl.returncode != 0:
+        sys.exit(1)
+    node_id = json.loads(pv.stdout).get('id')
+    pf = next((f for f in json.loads(fl.stdout).get('fields', []) if f.get('name') == field_name), None)
+    meta = {'node_id': node_id,
+            'field_id': pf.get('id') if pf else None,
+            'options': {o['name']: o['id'] for o in (pf.get('options', []) if pf else [])}}
+    json.dump(meta, open(cache, 'w'))
+
+if not meta.get('field_id'):
+    sys.exit(0)   # board has no such field → nothing to do
+opts = meta['options']
+optid = opts.get(value) \
+     or next((oid for name, oid in opts.items() if name.lower() == value.lower()), None) \
+     or next((oid for name, oid in opts.items() if name.lower().startswith(value.lower())), None)
+if not optid:
+    sys.exit(2)   # unmappable → skip (non-fatal)
+
+r = subprocess.run(['gh','project','item-edit','--id',item_id,'--project-id',meta['node_id'],
+                    '--field-id',meta['field_id'],'--single-select-option-id',optid],
+                   capture_output=True, text=True)
+sys.exit(0 if r.returncode == 0 else 1)
+PYEOF
+}
+
+# Temp cache for per-project field metadata (Priority + Kind + Initiative; cleaned on exit).
 PRIO_CACHE_DIR="$(mktemp -d)"
 trap 'rm -rf "$PRIO_CACHE_DIR"' EXIT
 
@@ -244,6 +302,8 @@ for story_file in "$STORY_DIR"/*.md; do
   PROJECT_OVERRIDE=$(echo   "$parsed" | grep '^PROJECT_OVERRIDE='   | cut -d= -f2-)
   MILESTONE_OVERRIDE=$(echo "$parsed" | grep '^MILESTONE_OVERRIDE=' | cut -d= -f2-)
   PRIORITY=$(echo "$parsed" | grep '^PRIORITY=' | cut -d= -f2-)
+  TYPE=$(echo     "$parsed" | grep '^TYPE='     | cut -d= -f2-)
+  INITIATIVE=$(echo "$parsed" | grep '^INITIATIVE=' | cut -d= -f2-)
   BODY=$(echo     "$parsed" | awk '/^---BODY---/{found=1; next} found{print}')
 
   ISSUE_REPO="${REPO_OVERRIDE:-$REPO}"
@@ -308,6 +368,16 @@ for story_file in "$STORY_DIR"/*.md; do
         else
           echo "          Warning: priority '$PRIORITY' not set (no field / unmapped) — non-fatal"
         fi
+      fi
+      # Set Kind from frontmatter `type:` (Epic/Story/Bug/Spike) — non-fatal.
+      if [[ -n "$TYPE" ]]; then
+        set_board_single_select "$ISSUE_PROJECT" "$owner" "$item_json" "Kind" "$TYPE" \
+          && echo "          Kind set: $TYPE" || true
+      fi
+      # Set Initiative from frontmatter `initiative:` (Insurance LOB/Certification/IS Foundations) — non-fatal.
+      if [[ -n "$INITIATIVE" ]]; then
+        set_board_single_select "$ISSUE_PROJECT" "$owner" "$item_json" "Initiative" "$INITIATIVE" \
+          && echo "          Initiative set: $INITIATIVE" || true
       fi
     else
       echo "          Warning: project add failed (non-fatal)"
