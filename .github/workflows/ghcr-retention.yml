@@ -1,0 +1,51 @@
+name: ghcr retention (prod, keep 5)
+
+# Bounds ghcr storage growth for the prod registry, mirroring Harbor's dev keep-3.
+# Keeps the 5 most-recent versions per prod service image; cosign signatures + SBOM
+# attestations of RETAINED images are preserved automatically by the action.
+#
+# DELIBERATELY EXCLUDED:
+#   - minicloud-app-deployment  → the Helm LIBRARY chart; consumers pin exact versions
+#     in Chart.lock, so pruning old versions would break `helm dependency build`
+#     (same "never GC a pinned artifact" reason postgresql* is protected in Harbor).
+#
+# SAFETY: ships in DRY-RUN. It only reports what it *would* delete until you:
+#   1. add an org secret GHCR_CLEANUP_TOKEN = a PAT with `read:packages`+`delete:packages`
+#      (the Vault platform/ghcr token is read-only — this needs a dashboard-minted PAT,
+#       same class as the deferred ghcr write-token follow-up in ops-runbooks.md), then
+#   2. review a dry-run's output (Actions → this workflow → run log), then
+#   3. flip `dry-run: "true"` → `"false"` below.
+
+on:
+  schedule:
+    - cron: "30 5 * * *" # daily 05:30 UTC (after Harbor's GC window)
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Report only, delete nothing"
+        type: boolean
+        default: true
+
+permissions:
+  packages: write
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old ghcr image versions (keep 5)
+        uses: snok/container-retention-policy@v3
+        with:
+          account: andrelair-platform
+          token: ${{ secrets.GHCR_CLEANUP_TOKEN }}
+          image-names: >-
+            platform-demo minicloud-plane minicloud-agent minicloud-crew-agent
+            retrieva-backend retrieva-frontend ktayl-policy-service
+            ktayl-iam-backend ktayl-iam-frontend ktayl-claims
+          image-tags: "!latest"
+          tag-selection: both
+          cut-off: 1w
+          keep-n-most-recent: 5
+          # DRY-RUN GUARD — see header. Flip to "false" only after adding the token
+          # and reviewing a dry-run. `workflow_dispatch` can override via its input.
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || 'true' }}
