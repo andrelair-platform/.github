@@ -40,9 +40,8 @@ andrelair-platform is the internal IT department — built from scratch on bare-
 - Registry: Harbor with cosign image signing + SBOM on every custom image
 
 **AI services — built for insurance workflows**
-- Self-hosted LLMs: Ollama + Open WebUI (advisor AI chat)
+- Self-hosted AI: Open WebUI + LiteLLM gateway (advisor AI chat)
 - Enterprise RAG pipeline: French insurance document ingestion → Docling OCR → structure-aware chunking (articles, clauses, annexes) → bge-m3 embeddings → pgvector HNSW + BM25 hybrid search
-- phi3-financial: domain-restricted AI assistant for Financial Lines (D&O, E&O, Crime) with PromptOps architecture — runtime prompt injection via LiteLLM + Langfuse, 25-case eval suite enforcing 100% pass rate as deployment gate
 - LLM tracing & eval: Langfuse + LiteLLM router across local and cloud providers
 
 ---
