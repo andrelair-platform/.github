@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Prune old ghcr image versions (keep 5)
-        uses: snok/container-retention-policy@v3
+        uses: snok/container-retention-policy@v3.1.0
         with:
           account: andrelair-platform
           token: ${{ secrets.GHCR_CLEANUP_TOKEN }}
@@ -42,7 +42,6 @@ jobs:
             platform-demo minicloud-plane minicloud-agent minicloud-crew-agent
             retrieva-backend retrieva-frontend ktayl-policy-service
             ktayl-iam-backend ktayl-iam-frontend ktayl-claims
-          image-tags: "!latest"
           tag-selection: both
           cut-off: 1w
           keep-n-most-recent: 5
