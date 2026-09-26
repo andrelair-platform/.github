@@ -4,17 +4,20 @@ name: ghcr retention (prod, keep 5)
 # Keeps the 5 most-recent versions per prod service image; cosign signatures + SBOM
 # attestations of RETAINED images are preserved automatically by the action.
 #
-# DELIBERATELY EXCLUDED:
+# DEPLOYMENT-AWARE SAFETY: a GitOps-pinned prod image can be OLDER than the 5 most
+# recent builds (stable services rarely rebuild). Plain keep-5 would delete the
+# running prod image → ImagePullBackOff on reschedule (verified in a 2026-09-26
+# dry-run: it would have deleted the deployed platform-demo/agent/crew/policy tags).
+# So step 1 reads the pinned prod tags from minicloud-gitops and EXCLUDES them
+# (plus `latest`) from deletion via image-tags negation — dynamic, so it stays
+# correct as Kargo bumps tags.
+#
+# DELIBERATELY EXCLUDED IMAGE:
 #   - minicloud-app-deployment  → the Helm LIBRARY chart; consumers pin exact versions
 #     in Chart.lock, so pruning old versions would break `helm dependency build`
 #     (same "never GC a pinned artifact" reason postgresql* is protected in Harbor).
 #
-# SAFETY: ships in DRY-RUN. It only reports what it *would* delete until you:
-#   1. add an org secret GHCR_CLEANUP_TOKEN = a PAT with `read:packages`+`delete:packages`
-#      (the Vault platform/ghcr token is read-only — this needs a dashboard-minted PAT,
-#       same class as the deferred ghcr write-token follow-up in ops-runbooks.md), then
-#   2. review a dry-run's output (Actions → this workflow → run log), then
-#   3. flip `dry-run: "true"` → `"false"` below.
+# SAFETY: real deletion runs on schedule. `workflow_dispatch` defaults to dry-run.
 
 on:
   schedule:
@@ -33,7 +36,23 @@ jobs:
   clean:
     runs-on: ubuntu-latest
     steps:
-      - name: Prune old ghcr image versions (keep 5)
+      - name: Resolve pinned prod tags to protect (from gitops)
+        id: protect
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/andrelair-platform/minicloud-gitops.git" gitops
+          # every `tag:` pinned in a prod values file = a currently-deployed image
+          tags=$(grep -rhoE '^\s*tag:[[:space:]]*"?[A-Za-z0-9._-]+' gitops/services/*/helm/values-prod.yaml \
+                   | grep -oE '[A-Za-z0-9._-]+$' | grep -vxE 'REPLACE_ME|tag' | sort -u)
+          exclude='!latest'
+          for t in $tags; do exclude="$exclude !$t"; done
+          echo "exclude=$exclude" >> "$GITHUB_OUTPUT"
+          echo "Protecting deployed prod tags from deletion: $exclude"
+          rm -rf gitops
+
+      - name: Prune old ghcr image versions (keep 5, protect deployed)
         uses: snok/container-retention-policy@v3.1.0
         with:
           account: andrelair-platform
@@ -42,9 +61,10 @@ jobs:
             platform-demo minicloud-plane minicloud-agent minicloud-crew-agent
             retrieva-backend retrieva-frontend ktayl-policy-service
             ktayl-iam-backend ktayl-iam-frontend ktayl-claims
+          # exclude `latest` + every deployed prod tag (negation = "all tags except these")
+          image-tags: ${{ steps.protect.outputs.exclude }}
           tag-selection: both
           cut-off: 1w
           keep-n-most-recent: 5
-          # DRY-RUN GUARD — see header. Flip to "false" only after adding the token
-          # and reviewing a dry-run. `workflow_dispatch` can override via its input.
-          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || 'true' }}
+          # workflow_dispatch respects its input (default dry-run); schedule = real prune.
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || 'false' }}
