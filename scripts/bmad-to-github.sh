@@ -328,10 +328,14 @@ for story_file in "$STORY_DIR"/*.md; do
     created=$((created + 1)); continue
   fi
 
-  existing=$(gh issue list --repo "$ISSUE_REPO" --search "[${STORY_ID}] in:title" \
+  # Idempotency MUST match issues in ANY state — a story whose issue was created and later CLOSED
+  # (e.g. the work shipped) must not be recreated. `gh issue list` defaults to --state open, so
+  # without --state all a closed issue is missed and the story is duplicated on the next sync
+  # (this recreated 29 done-story issues on 2026-09-27 when a story-dir merge re-ran the bridge).
+  existing=$(gh issue list --repo "$ISSUE_REPO" --state all --search "[${STORY_ID}] in:title" \
               --json number --jq '.[0].number' 2>/dev/null || true)
   if [[ -n "$existing" ]]; then
-    echo "          [SKIP] Already exists as #$existing"
+    echo "          [SKIP] Already exists as #$existing (open or closed)"
     skipped=$((skipped + 1)); continue
   fi
 
